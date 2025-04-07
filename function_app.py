@@ -65,4 +65,40 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.event_grid_trigger(arg_name="azeventgrid")
 def UploadFileEventTrigger(azeventgrid: func.EventGridEvent):
-    logging.info('Python EventGrid trigger processed an event')
+    logging.info('Python EventGrid trigger processed an event.')
+
+    try:
+        event_data = azeventgrid.get_json()
+        logging.info(f"Event data: {event_data}")
+
+        # Get source blob URL from event
+        blob_url = event_data.get("url")
+        logging.info(f"Blob URL from event: {blob_url}")
+
+        # Parse source container and blob name
+        parts = blob_url.replace("https://", "").split("/", 2)
+        source_account_name = parts[0].split(".")[0]
+        source_container_name = parts[1]
+        source_blob_name = parts[2]
+
+        # Destination details
+        destination_container_name = "sftp"
+        destination_blob_name = source_blob_name  # keep same name or customize if needed
+
+        # Construct source blob URL (already from event)
+        source_blob_url = blob_url
+
+        # Destination account connection string (hardcoded, since no env var)
+        dest_connection_string = (
+          
+        )
+
+        # Copy blob
+        dest_blob_service = BlobServiceClient.from_connection_string(dest_connection_string)
+        dest_blob_client = dest_blob_service.get_blob_client(destination_container_name, destination_blob_name)
+        copy_operation = dest_blob_client.start_copy_from_url(source_blob_url)
+
+        logging.info(f"Copy operation started. Status: {copy_operation['copy_status']}")
+
+    except Exception as e:
+        logging.error(f"Error in EventGrid-triggered file transfer: {str(e)}")
