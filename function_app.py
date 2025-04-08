@@ -1,7 +1,9 @@
 import azure.functions as func
 import logging
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 import json
+from datetime import datetime, timedelta
+import os
 
 
 
@@ -33,7 +35,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"Destination container: {DESTINATION_CONTAINER_NAME}, Destination blob: {DESTINATION_BLOB_NAME}")
 
         source_account_name = "altosftpstorageacc"
-        source_connection_string = "<source connection string>"
+        source_connection_string = os.getenv("SOURCE_CONNECTION_STRING")
 
         # Source
         source_container_name = SOURCE_CONTAINER_NAME
@@ -43,7 +45,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         
 
         # dest_account_name = "altoscmstorageacc"
-        dest_connection_string = "<destination connection string"
+        dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
 
         # Target
         target_container_name = DESTINATION_CONTAINER_NAME
@@ -101,10 +103,24 @@ def UploadFileEventTrigger(azeventgrid: func.EventGridEvent):
         destination_blob_name = source_blob_name  # keep same name or customize if needed
 
         # Construct source blob URL (already from event)
-        source_blob_url = blob_url
+        source_connection_string = os.getenv("SOURCE_CONNECTION_STRING")
+        source_blob_service = BlobServiceClient.from_connection_string(source_connection_string)
+        source_blob_client = source_blob_service.get_blob_client(container=source_container_name, blob=source_blob_name)
+
+        sas_token = generate_blob_sas(
+            account_name=source_account_name,
+            container_name=source_container_name,
+            blob_name=source_blob_name,
+            account_key=os.getenv("SOURCE_ACCOUNT_KEY"),
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.utcnow() + timedelta(minutes=10)
+        )
+
+        source_blob_url = f"{blob_url}?{sas_token}"
+        # source_blob_url = blob_url
 
         # Destination account connection string (hardcoded, since no env var)
-        dest_connection_string = "<destination conn string>"
+        dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
 
         # Copy blob
         dest_blob_service = BlobServiceClient.from_connection_string(dest_connection_string)

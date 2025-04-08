@@ -26,7 +26,7 @@ def test_upload_file_event_trigger_success(mock_blob_service_client, caplog):
     caplog.set_level(logging.INFO)
 
     event_data = {
-        "url": "https://altosftpstorageacc.blob.core.windows.net/sftp2/testfile.txt"
+        "url": "https://altosftpstorageacc.blob.core.windows.net/sftp/testfile.txt"
     }
 
     mock_event = MockEventGridEvent(event_data)
