@@ -1,7 +1,6 @@
 import azure.functions as func
 import logging
-from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
-import json
+from azure.storage.blob import BlobServiceClient
 import datetime
 import time
 import os
@@ -14,18 +13,11 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Transfer files from SFTP to SCM storage account')
 
     try:
-
-        # Checks sftp server for files that have been uploaded in the last 30 minutes 
-        # For each file, upload to destination storage account 
-        # Delete each file after upload 
-        # create a log of files that have been uploaded and deleted
-
         # SFTP credentials
-        logging.info(f"==================================================")
-        logging.info(f"==================== SFTP LOGIN ==================")
+        logging.info("========== SFTP LOGIN ==========")
         sftp_host = os.getenv("SFTP_HOST_NAME")
         sftp_port = int(os.getenv("SFTP_PORT"))
-        sftp_username = os.getenv("SFTP_USERNAME") 
+        sftp_username = os.getenv("SFTP_USERNAME")
         sftp_password = os.getenv("SFTP_PASSWORD")
 
         # Destination Blob Storage
@@ -33,7 +25,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
         dest_blob_service_client = BlobServiceClient.from_connection_string(dest_connection_string)
 
-        # Time range: last 30 minutes
+        # Time window: last 30 minutes
         now = time.time()
         thirty_minutes_ago = now - (30 * 60)
 
@@ -42,7 +34,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         transport.connect(username=sftp_username, password=sftp_password)
         sftp = paramiko.SFTPClient.from_transport(transport)
 
-        # Set working directory - Landing Page is currently sftp/Spotify
+        # Target directory inside /sftp/Spotify/
         target_dir = "ETrade"
         try:
             sftp.chdir(target_dir)
@@ -50,32 +42,31 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         except FileNotFoundError:
             logging.warning(f"Directory {target_dir} does not exist on SFTP server.")
             return func.HttpResponse(f"Directory '{target_dir}' does not exist on SFTP server.", status_code=200)
-        
-        # List and filter files
+
         files = sftp.listdir_attr()
         if not files:
             logging.info(f"No files found in SFTP directory: {target_dir}")
             return func.HttpResponse(f"No files found in {target_dir}", status_code=200)
 
         processed_files = []
+        skipped_files = []
 
         for file_attr in files:
             file_name = file_attr.filename
             file_mtime = file_attr.st_mtime
             remote_file_path = f"{file_name}"
 
-            # Only process .pgp files
-            # if not file_name.lower().endswith(".pgp"):
-            #     logging.info(f"Skipping non-.pgp file: {file_name}")
-            #     continue
-
             if file_mtime >= thirty_minutes_ago:
                 logging.info(f"Processing {file_name} (modified: {datetime.datetime.fromtimestamp(file_mtime)})")
 
                 try:
-
                     with sftp.file(remote_file_path, "rb") as file_handle:
                         file_data = file_handle.read()
+
+                        if len(file_data) == 0:
+                            logging.error(f"Skipped empty file: {file_name}")
+                            skipped_files.append(file_name)
+                            continue
 
                         # Upload to Blob
                         dest_blob_client = dest_blob_service_client.get_blob_client(
@@ -85,7 +76,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
                         dest_blob_client.upload_blob(file_data, overwrite=True)
                         logging.info(f"Uploaded {file_name} to blob storage.")
 
-                        # Delete from SFTP (optional)
+                        # Delete from SFTP
                         sftp.remove(remote_file_path)
                         logging.info(f"Deleted {file_name} from SFTP.")
 
@@ -93,18 +84,28 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
 
                 except FileNotFoundError:
                     logging.warning(f"File not found during processing: {remote_file_path}")
+                except Exception as e:
+                    logging.error(f"Error processing file {file_name}: {str(e)}")
 
         sftp.close()
         transport.close()
-        logging.info(f"Processed files: {', '.join(processed_files)}")
-        if processed_files:
-            return func.HttpResponse(f"Processed files: {', '.join(processed_files)}", status_code=200)
+
+        summary = {
+            "uploaded_files": processed_files,
+            "skipped_empty_files": skipped_files
+        }
+
+        logging.info(f"Upload Summary: {summary}")
+
+        if processed_files or skipped_files:
+            return func.HttpResponse(json.dumps(summary), status_code=200, mimetype="application/json")
         else:
             return func.HttpResponse("No new files found in the last 30 minutes.", status_code=200)
-        
+
     except Exception as e:
         logging.error(f"Error during file copy: {str(e)}")
         return func.HttpResponse(f"Error during file copy: {str(e)}", status_code=500)
+
 
 
 
@@ -214,4 +215,4 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
 #         # logging.info(f"Copy operation started. Status: {copy_operation['copy_status']}")
 
 #     except Exception as e:
-#         logging.error(f"Error during file copy: {str(e)}")
+#         logging.error(f"Error during file copy: {str(e)}") add to this full script na pls 
