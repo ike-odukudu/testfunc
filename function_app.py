@@ -6,6 +6,21 @@ import datetime
 import time
 import os
 import paramiko
+import pgpy
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.keys import KeyClient
+from azure.keyvault.secrets import SecretClient
+
+
+credential = DefaultAzureCredential()
+
+sftp_host = os.getenv("SFTP_HOST_NAME")
+sftp_port = int(os.getenv("SFTP_PORT"))
+sftp_username = os.getenv("SFTP_USERNAME") 
+sftp_password = os.getenv("SFTP_PASSWORD")
+
+dest_container_name = "sftp"
+dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -23,14 +38,8 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         # SFTP credentials
         logging.info(f"==================================================")
         logging.info(f"==================== SFTP LOGIN ==================")
-        sftp_host = os.getenv("SFTP_HOST_NAME")
-        sftp_port = int(os.getenv("SFTP_PORT"))
-        sftp_username = os.getenv("SFTP_USERNAME") 
-        sftp_password = os.getenv("SFTP_PASSWORD")
 
         # Destination Blob Storage
-        dest_container_name = "sftp"
-        dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
         dest_blob_service_client = BlobServiceClient.from_connection_string(dest_connection_string)
 
         # Time range: last 30 minutes
@@ -43,7 +52,8 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         sftp = paramiko.SFTPClient.from_transport(transport)
 
         # Set working directory - Landing Page is currently sftp/Spotify
-        target_dir = "ETrade"
+        # target_dir = "ETrade/Inbound"
+        target_dir = "/Spotify_KPMG/Files_To_ETrade/Inbound"
         try:
             sftp.chdir(target_dir)
             logging.info(f"Changed to directory: {target_dir}")
@@ -80,7 +90,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
                         # Upload to Blob
                         dest_blob_client = dest_blob_service_client.get_blob_client(
                             container=dest_container_name,
-                            blob=f"Spotify/ETrade/{file_name}"
+                            blob=f"Spotify/Etrade/Inbound/{file_name}"
                         )
                         dest_blob_client.upload_blob(file_data, overwrite=True)
                         logging.info(f"Uploaded {file_name} to blob storage.")
@@ -91,11 +101,16 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
 
                         processed_files.append(file_name)
 
+                    #handle decryption here - call decryption function here?
+
                 except FileNotFoundError:
                     logging.warning(f"File not found during processing: {remote_file_path}")
 
         sftp.close()
         transport.close()
+
+        # handle copy to archive storage account 
+
         logging.info(f"Processed files: {', '.join(processed_files)}")
         if processed_files:
             return func.HttpResponse(f"Processed files: {', '.join(processed_files)}", status_code=200)
@@ -105,113 +120,263 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"Error during file copy: {str(e)}")
         return func.HttpResponse(f"Error during file copy: {str(e)}", status_code=500)
+    
 
+@app.route(route="decryption", auth_level=func.AuthLevel.ANONYMOUS)
+def decryption(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("Starting decryption of files uploaded in the last 30 minutes")
 
+    secret_client = SecretClient(vault_url="https://alto-pgp-test-kv.vault.azure.net/", credential=credential)
 
-# @app.event_grid_trigger(arg_name="azeventgrid")
-# def UploadFileEventTrigger(azeventgrid: func.EventGridEvent):
+    # STORAGE_CONNECTION_STRING = secret_client.get_secret("storage-account-connection-string").value
+    STORAGE_CONNECTION_STRING = os.getenv("DESTINATION_CONNECTION_STRING")
 
-#     try:
-#         event_data = azeventgrid.get_json()
-#         #Handling Blob Created Events to only use SftpCommit and not SftpCreate
-#         api_type = event_data.get("api")
+    # Initialize BlobServiceClient
+    blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
 
-#         if api_type != "SftpCommit":
-#             logging.info(f"Ignoring event with api: {api_type}")
-#             return
+    # Get the PGP key location (either from file path or KeyVault)
+    pgp_key = secret_client.get_secret("public-key-2").value
+
+    pgp_private_key = secret_client.get_secret("private-key-2").value
+
+    passphrase = secret_client.get_secret("passphrase").value
+
+    container_name = dest_container_name
+    blob_prefix = "Spotify/Etrade/Inbound/"
+    # container_name = req.params.get('containerName')
+    # logging.info(f'Params.get {container_name}')
+
+    # if not container_name:
+    #     try:
+    #         req_body = req.get_json()
+    #         container_name = req_body.get('containerName')
+    #         logging.info(f'req.get_json {req_body}')
+    #         logging.info(f'req_body.get in try {container_name}')
+    #     except ValueError:
+    #         pass
+    # else:
+    #     container_name = req_body.get('containerName')
+    #     logging.info(f'req_body.get {container_name}')
+
+    try:
+        container_client = blob_service_client.get_container_client(container_name)
+        blobs = list(container_client.list_blobs(name_starts_with=blob_prefix))
+
+        if not blobs:
+            return func.HttpResponse(f"No blobs found in '{blob_prefix}'", status_code=404)
         
-#         logging.info(f"Event data: {event_data}")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        thirty_minutes_ago = now - datetime.timedelta(minutes=30)
 
-#         result = json.dumps({
-#             'id': azeventgrid.id,
-#             'data': azeventgrid.get_json(),
-#             'topic': azeventgrid.topic,
-#             'subject': azeventgrid.subject,
-#             'event_type': azeventgrid.event_type,
-#         })
+        recent_pgp_blobs = [
+            blob for blob in blobs
+            if blob.name.lower().endswith(".pgp") and blob.creation_time >= thirty_minutes_ago
+        ]
 
-#         logging.info('Python EventGrid trigger processed an event: %s', result)
+        if not recent_pgp_blobs:
+            return func.HttpResponse("No .pgp files uploaded in the last 30 minutes.", status_code=200)
+        
+        private_key, _ = pgpy.PGPKey.from_blob(pgp_private_key)
+        decrypted_count = 0
 
-#         # Get source blob URL from event
-#         blob_url = event_data.get("url")
-#         logging.info(f"Blob URL from event: {blob_url}")
+        for blob in recent_pgp_blobs:
+            blob_name = blob.name
+            logging.info(f"Decrypting blob: {blob_name} (uploaded: {blob.creation_time})")
 
-#         # Parse source container and blob name
-#         split_url_parts = blob_url.replace("https://", "").split("/", 3)
-#         source_account_name = split_url_parts[0].split(".")[0]
-#         source_container_name = split_url_parts[1]
-#         source_container_folder = split_url_parts[2]
-#         source_blob_name = split_url_parts[3]
+            try:
+                blob_client = container_client.get_blob_client(blob_name)
+                blob_data = blob_client.download_blob().readall()
 
-#         logging.info(f"Storage Account Name: {source_account_name}")
-#         logging.info(f"Storage Container Name: {source_container_name}")
-#         logging.info(f"Storage Container Folder: {source_container_folder}")
-#         logging.info(f"Storage Blob Name: {source_blob_name}")
+                if private_key.is_protected:
+                    with private_key.unlock(passphrase):
+                        logging.info("PGP private key unlocked with passphrase.")
 
-#         # SFTP credentials
-#         logging.info(f"==================================================")
-#         logging.info(f"==================== SFTP LOGIN ==================")
-#         sftp_host = os.getenv("SFTP_HOST_NAME")
-#         sftp_port = int(os.getenv("SFTP_PORT"))
-#         sftp_username = os.getenv("SFTP_USERNAME")  # e.g., "sftpuser1"
-#         sftp_password = os.getenv("SFTP_PASSWORD")
+                        # Load encrypted message properly
+                        message = pgpy.PGPMessage.from_blob(blob_data)
 
-#         remote_file_path = f"./{source_blob_name}"  # this is the virtual path - the parent directory is /sftp/Spotify
-#         dest_container_name = "sftp"
-#         dest_blob_name = f"{source_container_folder}/{source_blob_name}"
+                        # Decrypt
+                        decrypted_message = private_key.decrypt(message)
 
-#         # Destination blob storage connection
-#         dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
-#         dest_blob_service_client = BlobServiceClient.from_connection_string(dest_connection_string)
-#         dest_blob_client = dest_blob_service_client.get_blob_client(container=dest_container_name, blob=dest_blob_name)
+                        # Convert to bytes for upload
+                        decrypted_bytes = (
+                            decrypted_message.message.encode("utf-8")
+                            if isinstance(decrypted_message.message, str)
+                            else bytes(decrypted_message.message)
+                        )
 
-#         transport = paramiko.Transport((sftp_host, sftp_port))
-#         transport.connect(username=sftp_username, password=sftp_password)
+                # Remove only the final `.pgp` extension
+                if blob_name.lower().endswith(".pgp"):
+                    decrypted_blob_name = blob_name[:-4]  # Strip `.pgp`
+                else:
+                    decrypted_blob_name = blob_name  # fallback
 
-#         sftp = paramiko.SFTPClient.from_transport(transport)
+                decrypted_blob_client = container_client.get_blob_client(decrypted_blob_name)
+                decrypted_blob_client.upload_blob(decrypted_bytes, overwrite=True)
 
-#         with sftp.file(remote_file_path, "rb") as file_handle:
-#             file_data = file_handle.read()
-#             dest_blob_client.upload_blob(file_data, overwrite=True)
-#             logging.info("File uploaded to blob successfully.")
+                #upload into archive
 
-#         # Delete the file from the SFTP server
-#         sftp.remove(remote_file_path)
-#         logging.info(f"Deleted source file: {remote_file_path}")
+                decrypted_count += 1
+                logging.info(f"Decrypted and uploaded: {decrypted_blob_name}")
 
-#         sftp.close()
-#         transport.close()
+            except Exception as file_err:
+                logging.error(f"Failed to decrypt {blob_name}: {str(file_err)}")
 
-#         # # Destination details
-#         # destination_container_name = "sftp"
-#         # destination_blob_name = source_blob_name  # keep same name or customize if needed
+        return func.HttpResponse(f"Decrypted {decrypted_count} file(s).", status_code=200)
+    
+    except Exception as e:
+        logging.error(f"General error: {str(e)}")
+        return func.HttpResponse("Failed to complete decryption process.", status_code=500)
 
-#         # # Construct source blob URL (already from event)
-#         # source_connection_string = os.getenv("SOURCE_CONNECTION_STRING")
-#         # source_blob_service = BlobServiceClient.from_connection_string(source_connection_string)
-#         # source_blob_client = source_blob_service.get_blob_client(container=source_container_name, blob=source_blob_name)
 
-#         # sas_token = generate_blob_sas(
-#         #     account_name=source_account_name,
-#         #     container_name=source_container_name,
-#         #     blob_name=source_blob_name,
-#         #     account_key=os.getenv("SOURCE_ACCOUNT_KEY"),
-#         #     permission=BlobSasPermissions(read=True),
-#         #     expiry=datetime.utcnow() + timedelta(minutes=10)
-#         # )
 
-#         # source_blob_url = f"{blob_url}?{sas_token}"
-#         # # source_blob_url = blob_url
+@app.route(route="OutboundTransferFile")
+def OutboundTransferFile(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Outbound Function App Triggered and Processed a request')
 
-#         # # Destination account connection string (hardcoded, since no env var)
-#         # dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
+    fileName = req.params.get('fileName')
+    logging.info(f'Params.get {fileName}')
+    folderPath = req.params.get('folderPath')
+    logging.info(f'Params.get {folderPath}')
+    if not fileName or not folderPath:
+        try:
+            req_body = req.get_json()
+            fileName = req_body.get('fileName')
+            folderPath = req_body.get('folderPath')
+            logging.info(f'req.get_json {req_body}')
+            logging.info(f'req_body.get in try {fileName}, {folderPath}')
+        except ValueError:
+            pass
+    else:
+        fileName = req_body.get('fileName')
+        folderPath = req_body.get('folderPath')
+        logging.info(f'req_body.get {fileName}, {folderPath}')
 
-#         # # Copy blob
-#         # dest_blob_service = BlobServiceClient.from_connection_string(dest_connection_string)
-#         # dest_blob_client = dest_blob_service.get_blob_client(destination_container_name, destination_blob_name)
-#         # copy_operation = dest_blob_client.start_copy_from_url(source_blob_url)
+    # Function to copy file uploaded in Spotify/Etrade/Outbound to Archive/Spotify/Etrade/Outbound 
+    # both folders in sftp container 
 
-#         # logging.info(f"Copy operation started. Status: {copy_operation['copy_status']}")
+    # Function also moves the file to SFTP server from Spotify/Etrade/Outbound
 
-#     except Exception as e:
-#         logging.error(f"Error during file copy: {str(e)}")
+    source_conn_string = os.getenv("OUTBOUND_SOURCE_CONNECTION_STRING")
+    container_name = "sftp"
+    source_blob_path = f"Spotify/Etrade/Outbound/{fileName}"
+
+    # Date automatically generated from python in this format - YYYY-MM-DD and appended to path 
+    dest_blob_path = "Archive/Spotify/Etrade/Outbound"
+    date_folder = datetime.date.today().isoformat()
+    full_path = f"{dest_blob_path}/{date_folder}/{fileName}"
+    logging.info(f"full path - {full_path}")
+
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(source_conn_string)
+        container_client = blob_service_client.get_container_client(container_name)
+
+        source_blob_client = container_client.get_blob_client(source_blob_path)
+        source_blob_url = source_blob_client.url
+
+        dest_blob_client = container_client.get_blob_client(full_path)
+
+        # download blob to memory
+        blob_data = source_blob_client.download_blob().readall()
+
+        # Upload to archive folder
+        dest_blob_client.upload_blob(blob_data, overwrite=True)
+        logging.info(f"Copied blob to archive path: {dest_blob_path}")
+
+        # copy_operation = dest_blob_client.start_copy_from_url(source_blob_url)
+        # logging.info(f"Copy started. Status: {copy_operation['copy_status']}")
+        # logging.info(f"Copied from {source_blob_path} to {full_path}")
+
+
+        # Upload to SFTP 
+        # Connect to SFTP
+        sftp_target_dir = "/Spotify_KPMG/Files_To_ETrade/Outbound"
+        transport = paramiko.Transport((sftp_host, sftp_port))
+        transport.connect(username=sftp_username, password=sftp_password)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+
+        # try:
+        
+        sftp.chdir(sftp_target_dir)
+        # except IOError:
+        #     sftp.mkdir(sftp_target_dir)
+        #     sftp.chdir(sftp_target_dir)
+
+        sftp_file_path = f"{sftp_target_dir}/{fileName}"
+        logging.info(f"SFTP File Path - {sftp_file_path}")
+        with sftp.file(sftp_file_path, "wb") as sftp_file:
+            sftp_file.write(blob_data)
+            logging.info(f"Uploaded file to SFTP path: {sftp_file_path}")
+        
+        sftp.close()
+        transport.close()
+
+        return func.HttpResponse(f"Copied blob to archive to to {full_path} and uploaded to SFTP successfully: {sftp_file_path}", status_code=200)
+    
+    except Exception as e:
+        logging.error(f"Error during file copy: {str(e)}")
+        return func.HttpResponse(f"Error during file copy: {str(e)}", status_code=500)
+
+
+@app.route(route="copyfiletoarchive", auth_level=func.AuthLevel.ANONYMOUS)
+def copyfiletoarchive(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Copying Files to Archive Container')
+
+    # Destination Blob Storage
+    dest_blob_service_client = BlobServiceClient.from_connection_string(dest_connection_string)
+
+    archive_blob_path = "Archive/Spotify/Etrade/Inbound" #should be a request body
+    normal_blob_path = "Spotify/Etrade/Inbound/"
+    date_folder = datetime.date.today().isoformat()
+    container_name = "sftp"
+
+    try:
+        container_client = dest_blob_service_client.get_container_client(container_name)
+        blobs = list(container_client.list_blobs(name_starts_with=normal_blob_path))
+
+        if not blobs:
+            logging.info(f"No blobs found in '{normal_blob_path}'", status_code=404)
+            return func.HttpResponse(f"No blobs found in '{normal_blob_path}'", status_code=404)
+        
+        now = datetime.datetime.now(datetime.timezone.utc)
+        thirty_minutes_ago = now - datetime.timedelta(minutes=30)
+
+        recent_xlsx_blobs = [
+            blob for blob in blobs
+            if blob.name.lower().endswith(".xlsx") and blob.creation_time >= thirty_minutes_ago
+        ]
+
+        logging.info(f"Found {len(recent_xlsx_blobs)} .xlsx files modified in the last 30 minutes")
+
+        copied_blobs = []
+
+        if recent_xlsx_blobs:
+
+            for blob in recent_xlsx_blobs:
+                blob_name = blob.name
+                
+                logging.info(f"blob name - {blob_name}")
+
+                relative_name = blob_name.replace(normal_blob_path, "", 1)
+
+                full_path = f"{archive_blob_path}/{date_folder}/{relative_name}"
+
+                logging.info(f"full path - {full_path}")
+
+                blob_client = container_client.get_blob_client(blob_name)
+                blob_data = blob_client.download_blob().readall()
+
+                archive_blob_client = container_client.get_blob_client(full_path)
+
+                # Upload to archive folder
+                archive_blob_client.upload_blob(blob_data, overwrite=True)
+                logging.info(f"Copied blob to archive path: {full_path}")
+                copied_blobs.append(full_path)
+        else:
+            logging.info(f"No recent blobs in the last 30 minutes - {recent_xlsx_blobs}")
+            return func.HttpResponse(f"No recent blobs in the last 30 minutes", status_code=404)
+
+        return func.HttpResponse(f"Copied {len(copied_blobs)} file(s) to archive:\n" + "\n".join(copied_blobs),status_code=200)
+    
+    except Exception as e:
+        logging.error(f"Error during file copy: {str(e)}")
+        return func.HttpResponse(f"Error during file copy: {str(e)}", status_code=500)
