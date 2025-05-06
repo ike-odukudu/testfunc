@@ -3,8 +3,7 @@
 # Manually managing azure-functions-worker may cause unexpected issues
 
 azure-functions
-azure-storage-blob
-azure-storage-blob>=12.0.0
+azure-storage-blob==12.25.1
 paramiko
 azure-core==1.33.0
 azure-identity==1.21.0
@@ -22,6 +21,4 @@ pycparser==2.22
 PyJWT==2.10.1
 requests==2.32.3
 six==1.17.0
-typing_extensions==4.13.2
-urllib3==2.4.0
 PGPy==0.6.0

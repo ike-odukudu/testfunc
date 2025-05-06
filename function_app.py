@@ -53,7 +53,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
 
         # Set working directory - Landing Page is currently sftp/Spotify
         # target_dir = "ETrade/Inbound"
-        target_dir = "/Spotify_KPMG/Files_To_ETrade/Inbound"
+        target_dir = "/Spotify_KPMG/Files_To_ETrade/Inbound" #should be a request body
         try:
             sftp.chdir(target_dir)
             logging.info(f"Changed to directory: {target_dir}")
@@ -90,7 +90,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
                         # Upload to Blob
                         dest_blob_client = dest_blob_service_client.get_blob_client(
                             container=dest_container_name,
-                            blob=f"Spotify/Etrade/Inbound/{file_name}"
+                            blob=f"Spotify/Etrade/Inbound/{file_name}" #should be a request body
                         )
                         dest_blob_client.upload_blob(file_data, overwrite=True)
                         logging.info(f"Uploaded {file_name} to blob storage.")
@@ -122,7 +122,7 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error during file copy: {str(e)}", status_code=500)
     
 
-@app.route(route="decryption", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="decryption")
 def decryption(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Starting decryption of files uploaded in the last 30 minutes")
 
@@ -142,7 +142,7 @@ def decryption(req: func.HttpRequest) -> func.HttpResponse:
     passphrase = secret_client.get_secret("passphrase").value
 
     container_name = dest_container_name
-    blob_prefix = "Spotify/Etrade/Inbound/"
+    blob_prefix = "Spotify/Etrade/Inbound/" #should be a request body
     # container_name = req.params.get('containerName')
     # logging.info(f'Params.get {container_name}')
 
@@ -166,7 +166,7 @@ def decryption(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(f"No blobs found in '{blob_prefix}'", status_code=404)
         
         now = datetime.datetime.now(datetime.timezone.utc)
-        thirty_minutes_ago = now - datetime.timedelta(minutes=30)
+        thirty_minutes_ago = now - datetime.timedelta(minutes=180)
 
         recent_pgp_blobs = [
             blob for blob in blobs
@@ -213,7 +213,9 @@ def decryption(req: func.HttpRequest) -> func.HttpResponse:
                 decrypted_blob_client = container_client.get_blob_client(decrypted_blob_name)
                 decrypted_blob_client.upload_blob(decrypted_bytes, overwrite=True)
 
-                #upload into archive
+                # Delete the original .pgp file
+                container_client.delete_blob(blob_name)
+                logging.info(f"Deleted original encrypted blob: {blob_name}")
 
                 decrypted_count += 1
                 logging.info(f"Decrypted and uploaded: {decrypted_blob_name}")
@@ -257,11 +259,11 @@ def OutboundTransferFile(req: func.HttpRequest) -> func.HttpResponse:
     # Function also moves the file to SFTP server from Spotify/Etrade/Outbound
 
     source_conn_string = os.getenv("OUTBOUND_SOURCE_CONNECTION_STRING")
-    container_name = "sftp"
-    source_blob_path = f"Spotify/Etrade/Outbound/{fileName}"
+    container_name = "sftp" #should be a request body
+    source_blob_path = f"Spotify/Etrade/Outbound/{fileName}" #should be a request body
 
     # Date automatically generated from python in this format - YYYY-MM-DD and appended to path 
-    dest_blob_path = "Archive/Spotify/Etrade/Outbound"
+    dest_blob_path = "Archive/Spotify/Etrade/Outbound" #should be a request body
     date_folder = datetime.date.today().isoformat()
     full_path = f"{dest_blob_path}/{date_folder}/{fileName}"
     logging.info(f"full path - {full_path}")
@@ -317,7 +319,7 @@ def OutboundTransferFile(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error during file copy: {str(e)}", status_code=500)
 
 
-@app.route(route="copyfiletoarchive", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="copyfiletoarchive")
 def copyfiletoarchive(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Copying Files to Archive Container')
 
@@ -325,9 +327,10 @@ def copyfiletoarchive(req: func.HttpRequest) -> func.HttpResponse:
     dest_blob_service_client = BlobServiceClient.from_connection_string(dest_connection_string)
 
     archive_blob_path = "Archive/Spotify/Etrade/Inbound" #should be a request body
-    normal_blob_path = "Spotify/Etrade/Inbound/"
+    normal_blob_path = "Spotify/Etrade/Inbound/" #should be a request body
     date_folder = datetime.date.today().isoformat()
-    container_name = "sftp"
+    container_name = "sftp" #should be a request body
+    file_extension = ".csv" # should be a request body
 
     try:
         container_client = dest_blob_service_client.get_container_client(container_name)
@@ -340,18 +343,18 @@ def copyfiletoarchive(req: func.HttpRequest) -> func.HttpResponse:
         now = datetime.datetime.now(datetime.timezone.utc)
         thirty_minutes_ago = now - datetime.timedelta(minutes=30)
 
-        recent_xlsx_blobs = [
+        recent_file_blobs = [
             blob for blob in blobs
-            if blob.name.lower().endswith(".xlsx") and blob.creation_time >= thirty_minutes_ago
+            if blob.name.lower().endswith(file_extension) and blob.creation_time >= thirty_minutes_ago
         ]
 
-        logging.info(f"Found {len(recent_xlsx_blobs)} .xlsx files modified in the last 30 minutes")
+        logging.info(f"Found {len(recent_file_blobs)} {file_extension} files modified in the last 30 minutes")
 
         copied_blobs = []
 
-        if recent_xlsx_blobs:
+        if recent_file_blobs:
 
-            for blob in recent_xlsx_blobs:
+            for blob in recent_file_blobs:
                 blob_name = blob.name
                 
                 logging.info(f"blob name - {blob_name}")
@@ -372,7 +375,7 @@ def copyfiletoarchive(req: func.HttpRequest) -> func.HttpResponse:
                 logging.info(f"Copied blob to archive path: {full_path}")
                 copied_blobs.append(full_path)
         else:
-            logging.info(f"No recent blobs in the last 30 minutes - {recent_xlsx_blobs}")
+            logging.info(f"No recent blobs in the last 30 minutes - {recent_file_blobs}")
             return func.HttpResponse(f"No recent blobs in the last 30 minutes", status_code=404)
 
         return func.HttpResponse(f"Copied {len(copied_blobs)} file(s) to archive:\n" + "\n".join(copied_blobs),status_code=200)
