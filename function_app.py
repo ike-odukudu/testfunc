@@ -1,11 +1,12 @@
-import azure.functions as func
 import logging
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 import json
+import azure.functions as func
 import datetime
 import time
 import os
 import paramiko
+from helpers.log_error import log_error
 import pgpy
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.keys import KeyClient
@@ -120,7 +121,75 @@ def transferfile(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"Error during file copy: {str(e)}")
         return func.HttpResponse(f"Error during file copy: {str(e)}", status_code=500)
-    
+
+
+@app.route(route="emptyfilecheckerfunc")
+def emptyfilecheckerfunc(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("Starting empty file check in Spotify/Etrade/Inbound/...")
+
+    try:
+        # Destination Blob Storage
+        dest_container_name = "sftp"
+        dest_connection_string = os.getenv("DESTINATION_CONNECTION_STRING")
+        dest_blob_service_client = BlobServiceClient.from_connection_string(dest_connection_string)
+        container_client = dest_blob_service_client.get_container_client(dest_container_name)
+
+        # Define paths
+        folder_prefix = "Spotify/Etrade/Inbound/"
+        reporting_folder = "Spotify/Etrade/reportingemptyfiles/"
+        empty_files = []
+
+        # List all blobs under Inbound/
+        blobs = list(container_client.list_blobs(name_starts_with=folder_prefix))
+        if not blobs:
+            logging.info(f"No files found in {folder_prefix}")
+        else:
+            logging.info(f"Found {len(blobs)} files in {folder_prefix}")
+
+        for blob in blobs:
+            blob_name = blob.name
+            blob_size = blob.size
+
+            # Skip files already in reporting
+            if blob_name.startswith(reporting_folder):
+                continue
+
+            logging.info(f"Checking file: {blob_name} (size: {blob_size} bytes)")
+
+            if blob_size == 0:
+                logging.info(f"Empty file found: {blob_name}")
+
+                source_blob = container_client.get_blob_client(blob_name)
+                destination_blob_name = reporting_folder + os.path.basename(blob_name)
+                destination_blob = container_client.get_blob_client(destination_blob_name)
+
+                try:
+                    # Start copy and wait for it to begin
+                    destination_blob.start_copy_from_url(source_blob.url)
+                    time.sleep(2)
+
+                    # Delete original blob after copy starts
+                    source_blob.delete_blob()
+                    logging.info(f"Moved {blob_name} to {destination_blob_name} and deleted original.")
+
+                    empty_files.append(blob_name)
+
+                except Exception as e:
+                    logging.error(f"Failed to move {blob_name}: {str(e)}")
+
+        # Return result
+        if empty_files:
+            return func.HttpResponse(
+                json.dumps({"moved_empty_files": empty_files}),
+                status_code=200,
+                headers={"Content-Type": "application/json"}
+            )
+        else:
+            return func.HttpResponse("No empty files found in ETrade/Inbound/", status_code=200)
+
+    except Exception as e:
+        logging.error(f"Error during empty file check: {str(e)}")
+        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
 
 @app.route(route="decryption")
 def decryption(req: func.HttpRequest) -> func.HttpResponse:
@@ -143,20 +212,7 @@ def decryption(req: func.HttpRequest) -> func.HttpResponse:
 
     container_name = dest_container_name
     blob_prefix = "Spotify/Etrade/Inbound/" #should be a request body
-    # container_name = req.params.get('containerName')
-    # logging.info(f'Params.get {container_name}')
-
-    # if not container_name:
-    #     try:
-    #         req_body = req.get_json()
-    #         container_name = req_body.get('containerName')
-    #         logging.info(f'req.get_json {req_body}')
-    #         logging.info(f'req_body.get in try {container_name}')
-    #     except ValueError:
-    #         pass
-    # else:
-    #     container_name = req_body.get('containerName')
-    #     logging.info(f'req_body.get {container_name}')
+  
 
     try:
         container_client = blob_service_client.get_container_client(container_name)
@@ -204,9 +260,9 @@ def decryption(req: func.HttpRequest) -> func.HttpResponse:
                             else bytes(decrypted_message.message)
                         )
 
-                # Remove only the final `.pgp` extension
+                # Remove only the final .pgp extension
                 if blob_name.lower().endswith(".pgp"):
-                    decrypted_blob_name = blob_name[:-4]  # Strip `.pgp`
+                    decrypted_blob_name = blob_name[:-4]  # Strip .pgp
                 else:
                     decrypted_blob_name = blob_name  # fallback
 
@@ -228,8 +284,6 @@ def decryption(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"General error: {str(e)}")
         return func.HttpResponse("Failed to complete decryption process.", status_code=500)
-
-
 
 @app.route(route="OutboundTransferFile")
 def OutboundTransferFile(req: func.HttpRequest) -> func.HttpResponse:
